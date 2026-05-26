@@ -11,7 +11,7 @@ from typing import Optional, List
 from datetime import datetime
 
 # Import new modules
-from backend.logging_config import get_logger
+from backend.logging_config import get_logger, get_log_stats
 from backend.cache_and_limits import cache_manager, rate_limiter, cached
 from backend.jwt_manager import JWTManager, get_current_user_jwt
 from backend.webhooks import webhook_manager, WebhookEvent
@@ -94,9 +94,18 @@ class DocumentDraftRequest(BaseModel):
     include_citations: bool = False
 
 
-class DocumentScanRequest(BaseModel):
-    title: Optional[str] = None
-    language: Language = Language.EN
+class RefreshTokenRequest(BaseModel):
+    """Refresh token request"""
+    refresh_token: str
+
+
+class TokenResponse(BaseModel):
+    """Token response"""
+    success: bool
+    access_token: str
+    refresh_token: Optional[str] = None
+    expires_in: int = 86400  # 24 hours
+    token_type: str = "bearer"
 
 
 class QARequest(BaseModel):
@@ -129,17 +138,6 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
         return user
     except Exception as e:
         raise HTTPException(status_code=401, detail="Authentication failed")
-
-
-# ─── Health Check ────────────────────────────────────────────────────────────────
-@app.get("/health", tags=["System"])
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "service": "LegalSaathi API",
-        "timestamp": datetime.utcnow().isoformat()
-    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -203,6 +201,84 @@ async def user_logout(current_user = Depends(get_current_user)):
     try:
         # The token would be in the Authorization header
         return {"success": True, "message": "Logged out successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/auth/refresh", response_model=TokenResponse, tags=["Authentication"])
+async def refresh_token(request: RefreshTokenRequest):
+    """
+    Refresh access token using refresh token
+    
+    Request:
+    - refresh_token: str (the refresh token obtained during login)
+    """
+    try:
+        from backend.jwt_manager import JWTManager
+        
+        # Verify refresh token
+        payload = JWTManager.decode_token(request.refresh_token)
+        
+        if not payload:
+            raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+        
+        if payload.get("type") != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        
+        # Create new access token
+        mobile = payload.get("mobile")
+        new_access_token = JWTManager.create_access_token({
+            "mobile": mobile,
+            "sub": payload.get("sub")
+        })
+        
+        return {
+            "success": True,
+            "access_token": new_access_token,
+            "token_type": "bearer",
+            "expires_in": 86400
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/auth/verify-token", tags=["Authentication"])
+async def verify_access_token(authorization: Optional[str] = Header(None)):
+    """
+    Verify if access token is valid
+    
+    Header:
+    - Authorization: Bearer <token>
+    """
+    try:
+        from backend.jwt_manager import JWTManager
+        
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Missing authorization header")
+        
+        try:
+            scheme, token = authorization.split()
+            if scheme.lower() != "bearer":
+                raise HTTPException(status_code=401, detail="Invalid authorization scheme")
+        except ValueError:
+            raise HTTPException(status_code=401, detail="Invalid authorization format")
+        
+        payload = JWTManager.decode_token(token)
+        
+        if not payload:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        
+        return {
+            "success": True,
+            "valid": True,
+            "mobile": payload.get("mobile"),
+            "expires_at": payload.get("exp"),
+            "token_type": payload.get("type")
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -665,6 +741,28 @@ async def unregister_webhook(
 # MONITORING & STATS ROUTES
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@app.get("/", tags=["Health"])
+async def root():
+    """API root endpoint"""
+    return {
+        "success": True,
+        "message": "LegalSaathi API v2.0.0",
+        "docs": "/docs",
+        "redoc": "/redoc"
+    }
+
+
+@app.get("/health", tags=["Health"])
+async def health_check():
+    """System health check"""
+    return {
+        "success": True,
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "2.0.0"
+    }
+
+
 @app.get("/health/cache", tags=["Monitoring"])
 async def get_cache_stats():
     """Get cache statistics and performance metrics"""
@@ -686,24 +784,44 @@ async def get_cache_stats():
 
 @app.get("/health/limits", tags=["Monitoring"])
 async def get_rate_limit_stats(identifier: str = Query("global")):
-    """
-    Get rate limiter statistics for an identifier
-    
-    Query Parameters:
-    - identifier: str (default: "global", or provide user ID, mobile, or IP)
-    """
+    """Get rate limiter statistics"""
     try:
-        stats = rate_limiter.get_stats(identifier)
+        stats = rate_limiter.get_identifier_stats(identifier)
         return {
             "success": True,
             "identifier": identifier,
-            "rate_limiter": {
-                "requests_per_minute": stats.get("requests_per_minute", 0),
-                "requests_per_hour": stats.get("requests_per_hour", 0),
-                "minute_limit": 100,
-                "hour_limit": 2000,
-                "minute_remaining": max(0, 100 - stats.get("requests_per_minute", 0)),
-                "hour_remaining": max(0, 2000 - stats.get("requests_per_hour", 0))
+            "rate_limit": stats
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/health/logs", tags=["Monitoring"])
+async def get_logging_stats():
+    """Get logging statistics"""
+    try:
+        stats = get_log_stats()
+        return {
+            "success": True,
+            "logging": stats
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/health/system", tags=["Monitoring"])
+async def get_system_stats():
+    """Get comprehensive system statistics"""
+    try:
+        cache_stats = cache_manager.stats()
+        log_stats = get_log_stats()
+        
+        return {
+            "success": True,
+            "system": {
+                "timestamp": datetime.utcnow().isoformat(),
+                "cache": cache_stats,
+                "logging": log_stats
             }
         }
     except Exception as e:
@@ -772,4 +890,4 @@ async def general_exception_handler(request, exc):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)

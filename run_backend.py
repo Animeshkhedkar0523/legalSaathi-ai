@@ -12,23 +12,24 @@ sys.path.insert(0, project_root)
 
 def check_dependencies():
     """Check if all required packages are installed"""
-    required_packages = [
-        'fastapi',
-        'uvicorn',
-        'pydantic',
-        'python-dotenv',
-        'pytesseract',
-        'PyPDF2',
-        'python-docx',
-        'pillow'
-    ]
+    # Map package names to their import names
+    required_packages = {
+        'fastapi': 'fastapi',
+        'uvicorn': 'uvicorn',
+        'pydantic': 'pydantic',
+        'python-dotenv': 'dotenv',
+        'pytesseract': 'pytesseract',
+        'PyPDF2': 'PyPDF2',
+        'python-docx': 'docx',
+        'pillow': 'PIL'
+    }
     
     missing = []
-    for package in required_packages:
+    for package_name, import_name in required_packages.items():
         try:
-            __import__(package.replace('-', '_'))
+            __import__(import_name)
         except ImportError:
-            missing.append(package)
+            missing.append(package_name)
     
     if missing:
         print("❌ Missing packages:", ", ".join(missing))
@@ -63,7 +64,7 @@ def main():
     cmd = [
         sys.executable, "-m", "uvicorn",
         "main:app",
-        "--host", "0.0.0.0",
+        "--host", "127.0.0.1",
         "--port", "8000"
     ]
     
