@@ -814,6 +814,123 @@ async def get_rate_limit_stats(identifier: str = Query("global")):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADMIN PANEL ENDPOINTS (Protected)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/admin/dashboard", tags=["Admin"], dependencies=[Depends(get_current_user_jwt)])
+async def admin_dashboard(current_user: dict = Depends(get_current_user_jwt)):
+    """Admin dashboard with system statistics"""
+    try:
+        cache_stats = cache_manager.stats() if hasattr(cache_manager, 'stats') else {}
+        return {
+            "success": True,
+            "dashboard": {
+                "users_online": 0,  # TODO: Connect to actual metrics
+                "documents_processed_today": 0,
+                "api_requests_today": 0,
+                "cache_performance": cache_stats,
+                "system_health": "operational",
+                "last_updated": datetime.utcnow().isoformat()
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/users", tags=["Admin"], dependencies=[Depends(get_current_user_jwt)])
+async def list_users(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    current_user: dict = Depends(get_current_user_jwt)
+):
+    """List all users with pagination"""
+    try:
+        # TODO: Connect to actual database query
+        return {
+            "success": True,
+            "users": [],
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": 0
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/documents", tags=["Admin"], dependencies=[Depends(get_current_user_jwt)])
+async def list_documents(
+    status: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user_jwt)
+):
+    """List all documents with optional filtering"""
+    try:
+        # TODO: Connect to actual database query
+        return {
+            "success": True,
+            "documents": [],
+            "total": 0,
+            "filters": {"status": status}
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/admin/cache/clear", tags=["Admin"], dependencies=[Depends(get_current_user_jwt)])
+async def clear_cache(pattern: str = Query("*"), current_user: dict = Depends(get_current_user_jwt)):
+    """Clear cache entries matching pattern"""
+    try:
+        cleared = cache_manager.clear_cache(pattern)
+        return {
+            "success": True,
+            "message": f"Cleared {cleared} cache entries",
+            "pattern": pattern
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/admin/logs/export", tags=["Admin"], dependencies=[Depends(get_current_user_jwt)])
+async def export_logs(
+    format: str = Query("json", regex="^(json|csv)$"),
+    current_user: dict = Depends(get_current_user_jwt)
+):
+    """Export system logs"""
+    try:
+        log_stats = get_log_stats()
+        return {
+            "success": True,
+            "logs": log_stats,
+            "format": format,
+            "exported_at": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/system/config", tags=["Admin"], dependencies=[Depends(get_current_user_jwt)])
+async def get_system_config(current_user: dict = Depends(get_current_user_jwt)):
+    """Get current system configuration"""
+    try:
+        return {
+            "success": True,
+            "config": {
+                "environment": os.getenv("ENVIRONMENT", "development"),
+                "debug": os.getenv("DEBUG", "False") == "True",
+                "database": "PostgreSQL",
+                "cache_backend": "Redis",
+                "rate_limiting": "Enabled",
+                "jwt_expiry_access": "30 minutes",
+                "jwt_expiry_refresh": "7 days",
+                "log_level": os.getenv("LOG_LEVEL", "INFO")
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/health/logs", tags=["Monitoring"])
 async def get_logging_stats():
     """Get logging statistics"""
