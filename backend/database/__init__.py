@@ -8,6 +8,7 @@ from backend.database.models import (
     UserModel,
     DocumentModel,
     CitationModel,
+    DocumentChunkModel,
     OTPModel
 )
 
@@ -20,6 +21,7 @@ __all__ = [
     "UserModel",
     "DocumentModel",
     "CitationModel",
+    "DocumentChunkModel",
     "OTPModel"
 ]
 

@@ -87,13 +87,14 @@ class DocumentModel(Base):
     language = Column(String(10), default="en")
     overall_risk = Column(String(20), default="Low")
     risk_clauses_json = Column(JSON, nullable=True)
-    document_status = Column(String(30), default="completed")  # created, scanned, draft, completed
+    document_status = Column(String(30), default="INDEXED")  # UPLOADED, PROCESSING, INDEXING, INDEXED, FAILED
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
     user = relationship("UserModel", back_populates="documents")
     citations = relationship("CitationModel", back_populates="document", cascade="all, delete-orphan")
+    chunks = relationship("DocumentChunkModel", back_populates="document", cascade="all, delete-orphan")
 
 
 class CitationModel(Base):
@@ -110,6 +111,23 @@ class CitationModel(Base):
     
     # Relationships
     document = relationship("DocumentModel", back_populates="citations")
+
+
+class DocumentChunkModel(Base):
+    __tablename__ = "document_chunks"
+
+    id = Column(String(64), primary_key=True, default=lambda: f"chunk_{uuid.uuid4().hex[:12]}")
+    document_id = Column(String(64), ForeignKey("documents.id"), nullable=False, index=True)
+    chunk_index = Column(Integer, nullable=False)
+    text = Column(Text, nullable=False)
+    section = Column(String(255), nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    embedding_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    document = relationship("DocumentModel", back_populates="chunks")
+
 
 
 class OTPModel(Base):
