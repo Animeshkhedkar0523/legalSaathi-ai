@@ -399,9 +399,12 @@ class Config:
 
 ## Future Enhancements
 
-### Phase 2
-- [ ] Real LLM integration (GPT-4, Claude)
-- [ ] PostgreSQL database
+### Phase 2 (Completed Phase 2A AI Core & Phase 2B RAG Pipeline)
+- [x] Real LLM integration (OpenAI GPT-5.6)
+- [x] RAG Vector Search & Embeddings (`text-embedding-3-small` + `DocumentChunkModel`)
+- [x] Boundary-aware text chunker service
+- [x] PostgreSQL & SQLite persistence
+- [x] Grounded Legal Q&A & Hallucination Control
 - [ ] Cloud storage (AWS S3)
 - [ ] Email notifications
 - [ ] Advanced search & filtering
