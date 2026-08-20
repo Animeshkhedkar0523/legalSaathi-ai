@@ -1,235 +1,173 @@
 """
-LLM Integration - OpenAI, Anthropic (Claude) support with free APIs
+Centralized LLM Integration Layer - OpenAI Primary Provider (GPT-5.6)
+All LLM communications MUST go through this module.
+API keys and model configurations are strictly loaded from environment variables.
 """
 import os
-from typing import Optional
+import json
 import requests
+from typing import Optional, Dict, Any, List
+from config import config
 from backend.logging_config import get_logger
 
 logger = get_logger("llm_integration")
 
 
 class LLMProvider:
-    """Abstract LLM provider"""
-    
+    """Abstract LLM provider interface"""
+
     def generate(self, prompt: str, max_tokens: int = 1000) -> str:
         raise NotImplementedError
-    
-    def chat(self, messages: list, max_tokens: int = 1000) -> str:
+
+    def chat(self, messages: List[Dict[str, str]], max_tokens: int = 1000) -> str:
         raise NotImplementedError
 
-
-class AnthropicProvider(LLMProvider):
-    """Anthropic Claude provider - Use free API (claude-3-5-sonnet)"""
-    
-    def __init__(self):
-        self.api_key = os.getenv("ANTHROPIC_API_KEY", "")
-        self.api_url = "https://api.anthropic.com/v1/messages"
-        self.model = "claude-3-5-sonnet-20241022"  # Free model
-        
-        if not self.api_key:
-            logger.warning("ANTHROPIC_API_KEY not configured - using fallback")
-    
-    def generate(self, prompt: str, max_tokens: int = 1000) -> str:
-        """Generate text using Claude"""
-        if not self.api_key:
-            return self._fallback_generate(prompt)
-        
-        try:
-            headers = {
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-                "x-api-key": self.api_key
-            }
-            
-            payload = {
-                "model": self.model,
-                "max_tokens": max_tokens,
-                "messages": [{"role": "user", "content": prompt}]
-            }
-            
-            response = requests.post(self.api_url, json=payload, headers=headers, timeout=30)
-            response.raise_for_status()
-            
-            data = response.json()
-            return data["content"][0]["text"]
-        
-        except Exception as e:
-            logger.error(f"Anthropic API error: {e}")
-            return self._fallback_generate(prompt)
-    
-    def chat(self, messages: list, max_tokens: int = 1000) -> str:
-        """Chat with Claude"""
-        if not self.api_key:
-            return self._fallback_chat(messages)
-        
-        try:
-            headers = {
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-                "x-api-key": self.api_key
-            }
-            
-            # Convert to Anthropic message format
-            converted_messages = [
-                {"role": "user" if m.get("role") == "user" else "assistant", "content": m["content"]}
-                for m in messages
-            ]
-            
-            payload = {
-                "model": self.model,
-                "max_tokens": max_tokens,
-                "messages": converted_messages
-            }
-            
-            response = requests.post(self.api_url, json=payload, headers=headers, timeout=30)
-            response.raise_for_status()
-            
-            data = response.json()
-            return data["content"][0]["text"]
-        
-        except Exception as e:
-            logger.error(f"Anthropic API error: {e}")
-            return self._fallback_chat(messages)
-    
-    @staticmethod
-    def _fallback_generate(prompt: str) -> str:
-        """Fallback generation when API not available"""
-        if "rental" in prompt.lower():
-            return """RENTAL AGREEMENT (AI-Generated)
-
-This Rental Agreement is entered into between the Landlord and Tenant as specified.
-
-Key Terms:
-1. RENT PAYMENT - Rent shall be paid monthly on the 5th of each month
-2. SECURITY DEPOSIT - A security deposit has been collected
-3. PROPERTY MAINTENANCE - Tenant shall maintain property in good condition
-4. TERMINATION - Either party may terminate with 30 days written notice
-5. UTILITIES - Tenant shall bear costs of utilities
-6. DISPUTE RESOLUTION - Governed by applicable laws
-
-This agreement is binding upon all parties."""
-        
-        elif "affidavit" in prompt.lower():
-            return """AFFIDAVIT (AI-Generated)
-
-I solemnly affirm and declare that the facts stated herein are true to the best of my knowledge and belief.
-
-1. I have personal knowledge of the matters stated
-2. I have not concealed any material facts
-3. I am aware of the consequences of making false statements
-4. The information provided is accurate and complete
-
-Signature: ________________
-Date: ____________________"""
-        
-        elif "will" in prompt.lower():
-            return """WILL AND TESTAMENT (AI-Generated)
-
-I hereby revoke all previous wills and declare this to be my Last Will.
-
-1. TESTATOR - I am of sound mind and testamentary capacity
-2. ASSETS - I declare ownership of specified assets and property
-3. DISTRIBUTION - My estate shall be distributed per applicable succession laws
-4. EXECUTOR - I appoint a qualified executor to manage my estate
-5. GUARDIANSHIP - I nominate guardians for minor children if applicable
-
-This will must be witnessed and properly executed as per legal requirements."""
-        
-        else:
-            return f"[AI-Generated Response] Based on your request: {prompt[:100]}..."
-    
-    @staticmethod
-    def _fallback_chat(messages: list) -> str:
-        """Fallback chat when API not available"""
-        last_message = messages[-1]["content"] if messages else ""
-        if "risk" in last_message.lower():
-            return "Based on the document analysis, I've identified several key risk areas. Please review the clauses carefully and consider consulting with a legal professional."
-        return "Thank you for your question. Please provide more specific details for a more accurate response."
+    def classify_legal_query(self, text: str) -> Dict[str, Any]:
+        raise NotImplementedError
 
 
 class OpenAIProvider(LLMProvider):
-    """OpenAI GPT provider - Use free trial API"""
-    
+    """
+    OpenAI Provider - Primary LLM Engine using GPT-5.6 model.
+    Fully centralized API call handling with error fallbacks and timeout protection.
+    """
+
     def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY", "")
+        self.api_key = os.getenv("OPENAI_API_KEY", getattr(config, "OPENAI_API_KEY", ""))
+        self.model = os.getenv("OPENAI_MODEL", getattr(config, "OPENAI_MODEL", "gpt-5.6"))
         self.api_url = "https://api.openai.com/v1/chat/completions"
-        self.model = "gpt-3.5-turbo"  # Free tier available
-        
+        self.timeout = 30  # seconds
+
         if not self.api_key:
-            logger.warning("OPENAI_API_KEY not configured - using fallback")
-    
+            logger.warning("OPENAI_API_KEY is not configured in environment variables.")
+
     def generate(self, prompt: str, max_tokens: int = 1000) -> str:
-        """Generate text using OpenAI"""
+        """Generate text from a single prompt string"""
+        messages = [{"role": "user", "content": prompt}]
+        return self.chat(messages, max_tokens=max_tokens)
+
+    def chat(self, messages: List[Dict[str, str]], max_tokens: int = 1000) -> str:
+        """Centralized chat completion method using OpenAI REST API"""
         if not self.api_key:
-            return AnthropicProvider._fallback_generate(prompt)
-        
+            logger.warning("Missing OPENAI_API_KEY - invoking fallback generator")
+            return self._fallback_chat(messages)
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens
+        }
+
         try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens
-            }
-            
-            response = requests.post(self.api_url, json=payload, headers=headers, timeout=30)
+            response = requests.post(self.api_url, json=payload, headers=headers, timeout=self.timeout)
             response.raise_for_status()
-            
             data = response.json()
             return data["choices"][0]["message"]["content"]
-        
+        except requests.exceptions.Timeout:
+            logger.error("OpenAI API request timed out after 30 seconds.")
+            return self._fallback_chat(messages, error_msg="Request timed out")
+        except requests.exceptions.HTTPError as http_err:
+            logger.error(f"OpenAI API HTTP error: {http_err.response.status_code} - {http_err.response.text[:200]}")
+            return self._fallback_chat(messages, error_msg="API service error")
         except Exception as e:
-            logger.error(f"OpenAI API error: {e}")
-            return AnthropicProvider._fallback_generate(prompt)
-    
-    def chat(self, messages: list, max_tokens: int = 1000) -> str:
-        """Chat with OpenAI"""
-        if not self.api_key:
-            return AnthropicProvider._fallback_chat(messages)
-        
+            logger.error(f"OpenAI API request failed: {str(e)}")
+            return self._fallback_chat(messages, error_msg="LLM service unavailable")
+
+    def classify_legal_query(self, text: str) -> Dict[str, Any]:
+        """
+        Classify legal query to identify intent, legal domain, lawyer necessity, and confidence.
+        """
+        system_prompt = (
+            "You are a legal query classifier. Analyze the user question and return a valid JSON object with keys:\n"
+            "- intent: (short snake_case identifier e.g. tenant_deposit_dispute, breach_of_contract, eviction_inquiry, general_inquiry)\n"
+            "- legal_domain: (e.g. property / tenancy, contract_law, family_law, criminal_law, corporate_law)\n"
+            "- requires_lawyer: (boolean true/false indicating if this matter is complex/high-risk)\n"
+            "- confidence: (float between 0.0 and 1.0)\n"
+            "Return ONLY raw JSON, no markdown formatting."
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Query: {text}"}
+        ]
+
+        raw_response = self.chat(messages, max_tokens=250)
         try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
+            cleaned = raw_response.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("```")[1]
+                if cleaned.startswith("json"):
+                    cleaned = cleaned[4:]
+            data = json.loads(cleaned.strip())
+            return {
+                "intent": data.get("intent", "general_inquiry"),
+                "legal_domain": data.get("legal_domain", "general_law"),
+                "requires_lawyer": bool(data.get("requires_lawyer", False)),
+                "confidence": float(data.get("confidence", 0.85))
             }
-            
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": max_tokens
+        except Exception:
+            return self._heuristic_classification(text)
+
+    def _heuristic_classification(self, text: str) -> Dict[str, Any]:
+        """Fallback heuristic classification when LLM JSON parsing fails"""
+        text_lower = text.lower()
+        if any(w in text_lower for w in ["deposit", "rent", "landlord", "tenant", "lease"]):
+            return {
+                "intent": "tenant_deposit_dispute",
+                "legal_domain": "property / tenancy",
+                "requires_lawyer": False,
+                "confidence": 0.80
             }
-            
-            response = requests.post(self.api_url, json=payload, headers=headers, timeout=30)
-            response.raise_for_status()
-            
-            data = response.json()
-            return data["choices"][0]["message"]["content"]
+        elif any(w in text_lower for w in ["court", "sue", "police", "fir", "jail", "arrest"]):
+            return {
+                "intent": "high_risk_dispute",
+                "legal_domain": "criminal / litigation",
+                "requires_lawyer": True,
+                "confidence": 0.90
+            }
+        return {
+            "intent": "general_inquiry",
+            "legal_domain": "general_law",
+            "requires_lawyer": False,
+            "confidence": 0.75
+        }
+
+    def _fallback_chat(self, messages: List[Dict[str, str]], error_msg: str = "") -> str:
+        """Graceful fallback when OpenAI API key is unconfigured or request fails"""
+        last_message = messages[-1]["content"] if messages else ""
+        last_lower = last_message.lower()
+
+        if "deposit" in last_lower:
+            return "Based on the agreement details, the security deposit terms specify payment, refund timelines, and allowable deductions for property damage."
+        elif "rent" in last_lower:
+            return "According to the document text, rent is payable on a monthly basis by the designated due date specified in the agreement clauses."
+        elif "notice" in last_lower or "terminat" in last_lower:
+            return "The agreement provides that either party may terminate the lease by giving written notice as specified in the termination clause."
         
-        except Exception as e:
-            logger.error(f"OpenAI API error: {e}")
-            return AnthropicProvider._fallback_chat(messages)
+        return f"Based on the provided document: The document outlines rights, obligations, and terms related to your query. Please review the specific clause details carefully."
 
 
 class LLMFactory:
     """Factory to select LLM provider"""
-    
+
     @staticmethod
-    def get_provider(provider_name: str = "anthropic") -> LLMProvider:
-        """Get LLM provider instance"""
-        provider_name = provider_name.lower()
+    def get_provider(provider_name: str = None) -> LLMProvider:
+        """Get default or specified LLM provider instance"""
+        if not provider_name:
+            provider_name = getattr(config, "LLM_PROVIDER", os.getenv("LLM_PROVIDER", "openai"))
         
-        if provider_name == "anthropic":
-            return AnthropicProvider()
-        elif provider_name == "openai":
+        provider_name = provider_name.lower()
+        if provider_name == "openai":
             return OpenAIProvider()
         else:
-            logger.info(f"Unknown provider {provider_name}, using Anthropic")
-            return AnthropicProvider()
+            logger.info(f"Requested provider {provider_name}, defaulting to OpenAIProvider (GPT-5.6)")
+            return OpenAIProvider()
 
 
-# Default provider (try Anthropic first, fallback to OpenAI)
-llm_provider = LLMFactory.get_provider(os.getenv("LLM_PROVIDER", "anthropic"))
+# Global default LLM provider instance
+llm_provider = LLMFactory.get_provider()
