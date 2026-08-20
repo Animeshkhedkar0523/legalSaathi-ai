@@ -83,6 +83,14 @@ class StorageService:
                     session.add(c_model)
             
             session.commit()
+
+            # Auto-index document into RAG vector store
+            try:
+                from backend.services.rag_service import rag_service
+                rag_service.index_document(doc.document_id)
+            except Exception as rag_err:
+                pass
+
             return doc.document_id
         except Exception as e:
             session.rollback()
@@ -137,6 +145,14 @@ class StorageService:
                     session.add(c_model)
             
             session.commit()
+
+            # Auto-index document into RAG vector store
+            try:
+                from backend.services.rag_service import rag_service
+                rag_service.index_document(doc.document_id)
+            except Exception as rag_err:
+                pass
+
             return doc.document_id
         except Exception as e:
             session.rollback()
@@ -298,6 +314,14 @@ class StorageService:
             
             session.delete(doc)
             session.commit()
+
+            # Clean up vector store entries
+            try:
+                from backend.services.vector_store import vector_store
+                vector_store.delete_document_chunks(doc_id)
+            except Exception:
+                pass
+
             return True
         except Exception as e:
             session.rollback()
