@@ -652,31 +652,71 @@ async def extract_and_verify_citations(
 # Q&A ROUTES
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@app.post("/documents/{document_id}/index", tags=["Q&A"])
+async def index_document_route(
+    document_id: str,
+    current_user = Depends(get_current_user)
+):
+    """Trigger manual vector RAG indexing for a document (Owner authorized)"""
+    try:
+        doc = _assert_document_owner(document_id, current_user.id, current_user.mobile)
+        from backend.services.rag_service import rag_service
+        success = rag_service.reindex_document(document_id)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to index document vector chunks")
+        
+        return {
+            "success": True,
+            "document_id": document_id,
+            "status": "INDEXED",
+            "message": "Document successfully indexed for RAG vector search"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/documents/{document_id}/qa", tags=["Q&A"])
 async def ask_question(
     document_id: str,
     request: QARequest,
     current_user = Depends(get_current_user)
 ):
-    """Ask a question about a document (Owner authorized)"""
+    """Ask a document-aware legal question using RAG semantic retrieval (Owner authorized)"""
     try:
+        if not request.question or not request.question.strip():
+            raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+        if len(request.question.strip()) > 2000:
+            raise HTTPException(status_code=400, detail="Question exceeds maximum length of 2000 characters")
+
         doc = _assert_document_owner(document_id, current_user.id, current_user.mobile)
         text = storage_service.get_document_text(document_id)
         if not text:
-            raise HTTPException(status_code=404, detail="Document not found")
+            raise HTTPException(status_code=404, detail="Document content is empty or missing")
         
-        response = ai_service.answer_question(text, request.question, request.language)
+        response = ai_service.answer_question(
+            document_text=text,
+            question=request.question,
+            language=request.language,
+            document_id=document_id,
+            user_id=current_user.id
+        )
         
         return {
             "success": True,
             "document_id": document_id,
-            "question": request.question,
+            "question": request.question.strip(),
             **response
         }
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
