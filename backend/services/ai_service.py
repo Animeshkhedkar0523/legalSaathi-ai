@@ -274,30 +274,136 @@ Complete translation requires professional translator."""
         
         return text
     
-    def answer_question(self, document_text: str, question: str, language: Language) -> dict:
-        """Answer a question about the document"""
-        # In production, use RAG (Retrieval Augmented Generation) with LLM
+    def answer_question(
+        self,
+        document_text: str,
+        question: str,
+        language: Language = Language.EN,
+        document_id: Optional[str] = None,
+        user_id: Optional[str] = None
+    ) -> dict:
+        """
+        Document-aware Legal RAG Q&A powered by vector semantic retrieval & OpenAI GPT-5.6.
+        Performs query classification, vector chunk retrieval, hallucination prevention, and structured citation sourcing.
+        """
+        from backend.llm_integration import llm_provider
+        from backend.models.schemas import LegalQAResponse
+        from backend.services.rag_service import rag_service
+
+        # Input Validation
+        if not question or not question.strip():
+            raise ValueError("Question cannot be empty.")
         
-        # Simulate finding relevant clauses
-        relevant_clauses = []
-        words = question.lower().split()
-        
-        for word in words:
-            if word in document_text.lower():
-                # Find sentence containing the word
-                sentences = document_text.split('.')
-                for sent in sentences:
-                    if word in sent.lower() and sent.strip():
-                        relevant_clauses.append(sent.strip()[:100] + "...")
-                        break
-        
-        answer = f"Based on the document: {question}. This depends on the specific terms outlined in the agreement. Please review the relevant clauses mentioned below carefully."
-        
-        return QAResponse(
-            answer=answer,
-            relevant_clauses=relevant_clauses[:3],
-            confidence=0.7
+        question = question.strip()
+        if len(question) > 2000:
+            raise ValueError("Question exceeds maximum length of 2000 characters.")
+
+        if not document_text or not document_text.strip():
+            return LegalQAResponse(
+                answer="I couldn't find enough information in the uploaded document to answer this question reliably.",
+                legal_domain="general_law",
+                intent="empty_document",
+                confidence=0.0,
+                requires_lawyer=False,
+                sources=[],
+                disclaimer="LegalSaathi provides general legal information based on document content, not professional legal advice."
+            ).dict()
+
+        # 1. Classify Legal Question (Intent, Domain, Lawyer Necessity, Confidence)
+        classification = llm_provider.classify_legal_query(question)
+
+        # 2. Semantic RAG Chunk Retrieval
+        retrieved_chunks = []
+        if document_id and user_id:
+            try:
+                retrieved_chunks = rag_service.retrieve_relevant_chunks(
+                    document_id=document_id,
+                    query=question,
+                    user_id=user_id
+                )
+            except Exception:
+                retrieved_chunks = []
+
+        # 3. Hallucination Control: Check if query terms exist in context
+        # If retrieved_chunks is empty, fallback to document_text if query keyword exists, else return grounded "not found" response
+        context_text = ""
+        sources = []
+
+        if retrieved_chunks:
+            context_blocks = []
+            for c in retrieved_chunks:
+                context_blocks.append(f"[{c.get('section', 'Section')}] {c.get('text', '')}")
+                sources.append({
+                    "document_id": c.get("document_id", document_id),
+                    "chunk_id": c.get("chunk_id", ""),
+                    "section": c.get("section", "General"),
+                    "relevance_score": c.get("relevance_score", 1.0)
+                })
+            context_text = "\n\n".join(context_blocks)
+        else:
+            # Simple keyword relevance check on document_text
+            import re
+            query_keywords = [w for w in re.findall(r'\w+', question.lower()) if len(w) >= 3 and w not in ["what", "where", "when", "which", "how", "much", "many", "this", "that", "with"]]
+            has_relevant_keyword = any(kw in document_text.lower() for kw in query_keywords) if query_keywords else True
+
+            if not has_relevant_keyword:
+                return LegalQAResponse(
+                    answer="I couldn't find enough information in the uploaded document to answer this question reliably. Would you like general legal information or help finding a lawyer?",
+                    legal_domain=classification.get("legal_domain", "general_law"),
+                    intent=classification.get("intent", "general_inquiry"),
+                    confidence=0.0,
+                    requires_lawyer=classification.get("requires_lawyer", False),
+                    sources=[],
+                    disclaimer="LegalSaathi provides general legal information based on document content, not professional legal advice. Consult a qualified advocate for specific legal decisions."
+                ).dict()
+            
+            context_text = document_text[:1500]
+
+        # 4. Build Grounded LLM System & User Prompts
+        system_prompt = (
+            "You are LegalSaathi AI, a legal assistant for Indian documents.\n"
+            "Answer the user's question accurately using ONLY the provided document context.\n"
+            "STRICT RULES:\n"
+            "- Do NOT present yourself as a lawyer or legal advocate.\n"
+            "- Do NOT invent, fabricate, or hallucinate case citations, court decisions, PAN numbers, or act sections.\n"
+            "- If the answer cannot be found in the provided context, state clearly: 'I couldn't find enough information in the uploaded document to answer this question reliably.'\n"
+            "- Clearly distinguish document facts from general legal information.\n"
+            "- Answer in plain, easy to understand language."
+        )
+
+        lang_val = language.value if hasattr(language, "value") else str(language)
+        user_prompt = (
+            f"RETRIEVED DOCUMENT CONTEXT:\n"
+            f"----------------------------------------\n"
+            f"{context_text}\n"
+            f"----------------------------------------\n\n"
+            f"USER QUESTION: {question}\n"
+            f"RESPONSE LANGUAGE: {lang_val}\n"
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+
+        # 5. Call Centralized LLM Provider
+        answer_text = llm_provider.chat(messages, max_tokens=1000)
+
+        # 6. Final Grounded Check: If LLM states text is not present, clean sources
+        if "couldn't find enough information" in answer_text.lower() or "does not state" in answer_text.lower() or "not mentioned" in answer_text.lower() or "not specified" in answer_text.lower():
+            sources = []
+
+        return LegalQAResponse(
+            answer=answer_text,
+            legal_domain=classification.get("legal_domain", "general_law"),
+            intent=classification.get("intent", "general_inquiry"),
+            confidence=float(classification.get("confidence", 0.85)),
+            requires_lawyer=bool(classification.get("requires_lawyer", False)),
+            sources=sources,
+            disclaimer="LegalSaathi provides general legal information based on document content, not professional legal advice. Consult a qualified advocate for specific legal decisions."
         ).dict()
+
+
 
 
 # Initialize service
