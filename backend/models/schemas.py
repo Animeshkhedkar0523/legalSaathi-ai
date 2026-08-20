@@ -2,7 +2,7 @@
 Data models and schemas for LegalSaathi
 """
 from enum import Enum
-from typing import Optional, List
+from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 from pydantic import BaseModel, Field
 
@@ -113,6 +113,17 @@ class QAResponse(BaseModel):
     confidence: float = 0.0
 
 
+class LegalQAResponse(BaseModel):
+    answer: str
+    legal_domain: str
+    intent: str
+    confidence: float = 0.0
+    requires_lawyer: bool = False
+    sources: List[Union[str, Dict[str, Any]]] = []
+    disclaimer: str = "LegalSaathi provides general legal information based on document content, not professional legal advice. Consult a qualified advocate for specific legal decisions."
+
+
 class QARequest(BaseModel):
     question: str
     language: Language = Language.EN
+
