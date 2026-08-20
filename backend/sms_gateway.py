@@ -108,14 +108,18 @@ class DummySMSProvider(SMSProvider):
 
 
 class SMSGateway:
-    """SMS Gateway wrapper with fallback"""
+    """SMS Gateway wrapper with provider abstraction and fallback"""
     
     def __init__(self):
+        self.refresh_providers()
+        
+    def refresh_providers(self):
         self.providers = []
+        env = os.getenv("ENVIRONMENT", "development")
         
         # Add Twilio if configured
         twilio = TwilioProvider()
-        if twilio.account_sid and twilio.auth_token:
+        if twilio.account_sid and twilio.auth_token and twilio.phone_number:
             self.providers.append(("twilio", twilio))
         
         # Add Textlocal if configured
@@ -123,14 +127,20 @@ class SMSGateway:
         if textlocal.api_key:
             self.providers.append(("textlocal", textlocal))
         
-        # Always add dummy provider
-        self.providers.append(("dummy", DummySMSProvider()))
+        # Only add dummy provider in non-production environments
+        if env != "production":
+            self.providers.append(("dummy", DummySMSProvider()))
     
     def send_sms(self, phone: str, message: str) -> Tuple[bool, str, str]:
         """
         Send SMS with automatic fallback
         Returns: (success, message_id, provider_name)
         """
+        self.refresh_providers()
+        if not self.providers:
+            logger.error("No SMS providers configured for environment")
+            return False, "No SMS providers available", "none"
+
         for provider_name, provider in self.providers:
             try:
                 success, msg_id = provider.send_sms(phone, message)
@@ -140,20 +150,21 @@ class SMSGateway:
                 logger.warning(f"{provider_name} failed: {e}")
                 continue
         
-        return False, "", "none"
+        return False, "All SMS providers failed", "none"
     
     def send_otp(self, phone: str, otp: str) -> Tuple[bool, str]:
-        """Send OTP SMS"""
+        """Send OTP SMS safely without logging OTP content"""
         message = f"Your LegalSaathi OTP is: {otp}. Valid for 5 minutes."
         success, msg_id, provider = self.send_sms(phone, message)
         
         if success:
-            logger.info(f"OTP sent via {provider} to {phone}")
+            logger.info(f"OTP SMS sent via {provider} to {phone}")
         else:
-            logger.error(f"Failed to send OTP to {phone}")
+            logger.error(f"Failed to send OTP SMS to {phone}")
         
         return success, provider
 
 
 # Global SMS gateway instance
 sms_gateway = SMSGateway()
+

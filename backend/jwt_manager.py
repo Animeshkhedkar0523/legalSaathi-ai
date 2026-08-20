@@ -8,11 +8,14 @@ from typing import Optional, Dict, Any
 from fastapi import HTTPException, Depends, Header
 import secrets
 
+from config import config
+
 # Configuration
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production-12345")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_HOURS = int(os.getenv("TOKEN_EXPIRY_DAYS", 30)) * 24  # Convert days to hours
-REFRESH_TOKEN_EXPIRE_DAYS = 90
+SECRET_KEY = getattr(config, "JWT_SECRET_KEY", os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "dev-secret-key")))
+ALGORITHM = getattr(config, "JWT_ALGORITHM", os.getenv("JWT_ALGORITHM", "HS256"))
+ACCESS_TOKEN_EXPIRE_MINUTES = getattr(config, "ACCESS_TOKEN_EXPIRE_MINUTES", int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30)))
+REFRESH_TOKEN_EXPIRE_DAYS = getattr(config, "REFRESH_TOKEN_EXPIRE_DAYS", int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", 7)))
+
 
 
 class JWTManager:

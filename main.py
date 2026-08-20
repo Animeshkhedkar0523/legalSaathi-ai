@@ -12,6 +12,8 @@ from typing import Optional, List
 from datetime import datetime
 
 # Import new modules
+from config import config, validate_environment
+from backend.database import init_db
 from backend.logging_config import get_logger, get_log_stats
 from backend.cache_and_limits import cache_manager, rate_limiter, cached
 from backend.jwt_manager import JWTManager, get_current_user_jwt
@@ -25,7 +27,8 @@ from backend.services.auth_service import (
     verify_otp_and_login,
     verify_token,
     logout,
-    get_user_by_mobile
+    get_user_by_mobile,
+    get_user_by_id
 )
 from backend.services.ai_service import AIService
 from backend.services.ocr_service import OCRService
@@ -46,6 +49,10 @@ from backend.models.schemas import (
 
 # Initialize logger
 logger = get_logger("main")
+
+# Run environment validation and database initialization
+validate_environment()
+init_db()
 
 # Initialize services
 app = FastAPI(
@@ -70,8 +77,8 @@ async def add_security_headers(request, call_next):
     
     return response
 
-# Add CORS middleware with restricted origins
-allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8080").split(",")
+# Add CORS middleware with restricted origins from config
+allowed_origins = getattr(config, "CORS_ORIGINS", ["http://localhost:8501", "http://localhost:3000"])
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -139,23 +146,40 @@ class RiskAnalysisResponse(BaseModel):
 
 # ─── Authentication Dependency ───────────────────────────────────────────────────
 async def get_current_user(authorization: Optional[str] = Header(None)):
-    """Dependency to verify token and get current user"""
+    """Dependency to verify JWT token and get current user object from database"""
     if not authorization:
-        raise HTTPException(status_code=401, detail="Missing authorization token")
+        raise HTTPException(status_code=401, detail="Missing authorization header")
     
     try:
-        token = authorization.replace("Bearer ", "")
-        mobile = verify_token(token)
-        if not mobile:
+        try:
+            scheme, token = authorization.split()
+            if scheme.lower() != "bearer":
+                raise HTTPException(status_code=401, detail="Invalid authorization scheme")
+        except ValueError:
+            token = authorization.replace("Bearer ", "").strip()
+        
+        payload = JWTManager.verify_token(token)
+        if not payload:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
         
-        user = get_user_by_mobile(mobile)
+        user_id = payload.get("sub")
+        mobile = payload.get("mobile")
+        
+        user = None
+        if user_id:
+            user = get_user_by_id(user_id)
+        if not user and mobile:
+            user = get_user_by_mobile(mobile)
+            
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
         
         return user
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=401, detail="Authentication failed")
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -463,6 +487,21 @@ async def scan_document(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _assert_document_owner(document_id: str, user_id: str, user_mobile: str):
+    """Enforce that the requesting user owns the target document"""
+    doc = storage_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    owned = storage_service.get_user_document_by_id(document_id, user_id)
+    if not owned:
+        user_docs = storage_service.list_user_documents(user_mobile)
+        doc_ids = [d["document_id"] for d in user_docs]
+        if document_id not in doc_ids:
+            raise HTTPException(status_code=403, detail="Forbidden: You do not have access to this document")
+    return doc
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # DOCUMENT RETRIEVAL ROUTES
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -486,12 +525,9 @@ async def get_document(
     document_id: str,
     current_user = Depends(get_current_user)
 ):
-    """Get a specific document by ID"""
+    """Get a specific document by ID (Owner authorized)"""
     try:
-        document = storage_service.get_document(document_id)
-        if not document:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
+        document = _assert_document_owner(document_id, current_user.id, current_user.mobile)
         return {
             "success": True,
             "document": document.dict()
@@ -507,9 +543,10 @@ async def delete_document(
     document_id: str,
     current_user = Depends(get_current_user)
 ):
-    """Delete a document"""
+    """Delete a document (Owner authorized)"""
     try:
-        if storage_service.delete_document(document_id, current_user.mobile):
+        _assert_document_owner(document_id, current_user.id, current_user.mobile)
+        if storage_service.delete_document(document_id, user_id=current_user.id):
             return {"success": True, "message": "Document deleted"}
         else:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -528,8 +565,9 @@ async def analyze_risks(
     document_id: str,
     current_user = Depends(get_current_user)
 ):
-    """Analyze risks in a document"""
+    """Analyze risks in a document (Owner authorized)"""
     try:
+        doc = _assert_document_owner(document_id, current_user.id, current_user.mobile)
         text = storage_service.get_document_text(document_id)
         if not text:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -554,8 +592,9 @@ async def summarize_document(
     language: Language = Language.EN,
     current_user = Depends(get_current_user)
 ):
-    """Get document summary"""
+    """Get document summary (Owner authorized)"""
     try:
+        doc = _assert_document_owner(document_id, current_user.id, current_user.mobile)
         text = storage_service.get_document_text(document_id)
         if not text:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -584,8 +623,9 @@ async def extract_and_verify_citations(
     document_id: str,
     current_user = Depends(get_current_user)
 ):
-    """Extract and verify citations in a document"""
+    """Extract and verify citations in a document (Owner authorized)"""
     try:
+        doc = _assert_document_owner(document_id, current_user.id, current_user.mobile)
         text = storage_service.get_document_text(document_id)
         if not text:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -618,8 +658,9 @@ async def ask_question(
     request: QARequest,
     current_user = Depends(get_current_user)
 ):
-    """Ask a question about a document"""
+    """Ask a question about a document (Owner authorized)"""
     try:
+        doc = _assert_document_owner(document_id, current_user.id, current_user.mobile)
         text = storage_service.get_document_text(document_id)
         if not text:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -648,8 +689,9 @@ async def translate_document(
     target_language: Language = Language.HI,
     current_user = Depends(get_current_user)
 ):
-    """Translate a document to another language"""
+    """Translate a document to another language (Owner authorized)"""
     try:
+        doc = _assert_document_owner(document_id, current_user.id, current_user.mobile)
         text = storage_service.get_document_text(document_id)
         if not text:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -667,6 +709,7 @@ async def translate_document(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

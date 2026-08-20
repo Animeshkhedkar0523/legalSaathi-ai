@@ -37,11 +37,29 @@ class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key")
     ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
     
+    # JWT Authentication
+    JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", os.getenv("SECRET_KEY", "dev-secret-key-change-in-production"))
+    JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+    ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
+    REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", 7))
+    
+    # CORS
+    CORS_ORIGINS = [
+        origin.strip() 
+        for origin in os.getenv("CORS_ORIGINS", "http://localhost:8501,http://localhost:3000,http://127.0.0.1:8501").split(",") 
+        if origin.strip()
+    ]
+    
+    # OTP & Security
+    OTP_LENGTH = int(os.getenv("OTP_LENGTH", 6))
+    OTP_EXPIRY_SECONDS = int(os.getenv("OTP_EXPIRY_SECONDS", 300))
+    OTP_MAX_ATTEMPTS = int(os.getenv("OTP_MAX_ATTEMPTS", 5))
+    OTP_RESEND_COOLDOWN_SECONDS = int(os.getenv("OTP_RESEND_COOLDOWN_SECONDS", 60))
+    SMS_PROVIDER = os.getenv("SMS_PROVIDER", "twilio")
+    
     # Session
     SESSION_TIMEOUT_MINUTES = int(os.getenv("SESSION_TIMEOUT_MINUTES", 30))
     TOKEN_EXPIRY_DAYS = int(os.getenv("TOKEN_EXPIRY_DAYS", 30))
-    OTP_LENGTH = int(os.getenv("OTP_LENGTH", 6))
-    OTP_EXPIRY_SECONDS = int(os.getenv("OTP_EXPIRY_SECONDS", 300))
     
     # Email
     SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
@@ -86,3 +104,32 @@ elif config_name == "testing":
     config = TestingConfig()
 else:
     config = DevelopmentConfig()
+
+
+def validate_environment() -> None:
+    """
+    Validate startup environment variables.
+    In production mode, fail fast if required secrets or configurations are missing.
+    """
+    if config.ENVIRONMENT == "production":
+        missing_vars = []
+        if not config.SECRET_KEY or config.SECRET_KEY == "dev-secret-key":
+            missing_vars.append("SECRET_KEY")
+        if not config.JWT_SECRET_KEY or "dev-secret-key" in config.JWT_SECRET_KEY:
+            missing_vars.append("JWT_SECRET_KEY")
+        if not config.DATABASE_URL or config.DATABASE_URL == "sqlite:///legal_saathi.db":
+            missing_vars.append("DATABASE_URL (Production requires a production database URL)")
+        
+        if config.SMS_PROVIDER.lower() == "twilio":
+            if not config.TWILIO_ACCOUNT_SID:
+                missing_vars.append("TWILIO_ACCOUNT_SID")
+            if not config.TWILIO_AUTH_TOKEN:
+                missing_vars.append("TWILIO_AUTH_TOKEN")
+            if not config.TWILIO_PHONE_NUMBER:
+                missing_vars.append("TWILIO_PHONE_NUMBER")
+                
+        if missing_vars:
+            raise ValueError(
+                f"Production environment validation failed. Missing or insecure variables: {', '.join(missing_vars)}"
+            )
+

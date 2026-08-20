@@ -1,160 +1,271 @@
 """
-Authentication Service - Handles user registration, OTP, and login
+Authentication Service - Database-backed User Registration, OTP Management, and JWT Authentication
 """
 import random
 import string
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, Any
+from backend.database import SessionLocal, UserModel, OTPModel
 from backend.models.schemas import User, UserRegister, LoginResult, Language, InterfaceMode
-import json
-import os
-
-# ── In-Memory Database (for development) ───────────────────────────────────────
-_USERS_DB = {}  # {mobile: user_dict}
-_OTP_DB = {}    # {mobile: {"otp": code, "expires": timestamp}}
-_TOKENS_DB = {} # {token: mobile}
-
-# ── Config ─────────────────────────────────────────────────────────────────────
-OTP_LENGTH = 6
-OTP_EXPIRY_SECONDS = 300  # 5 minutes
-TOKEN_EXPIRY_DAYS = 30
+from backend.jwt_manager import JWTManager
+from backend.sms_gateway import sms_gateway
+from config import config
 
 
 def _generate_otp() -> str:
-    """Generate a 6-digit OTP"""
-    return ''.join(random.choices(string.digits, k=OTP_LENGTH))
-
-
-def _generate_token() -> str:
-    """Generate a unique token"""
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=32))
-
-
-def _generate_user_id() -> str:
-    """Generate a unique user ID"""
-    return f"user_{datetime.utcnow().timestamp()}_{_generate_token()[:8]}"
+    """Generate a random numeric OTP string"""
+    length = getattr(config, "OTP_LENGTH", 6)
+    return ''.join(random.choices(string.digits, k=length))
 
 
 def register_and_send_otp(data: UserRegister) -> dict:
     """
-    Register a user and send OTP to their mobile.
-    Returns OTP for development (should be sent via SMS in production).
+    Register a user or update user profile and send OTP via SMS gateway.
+    Handles rate-limiting resend cooldowns and environment-specific response formatting.
     """
-    mobile = data.mobile
+    mobile = data.mobile.strip()
+    if not mobile or len(mobile) < 10 or not mobile.isdigit():
+        raise ValueError("Invalid phone number format. Must be a 10-digit mobile number.")
     
-    # Check if user already exists
-    if mobile in _USERS_DB:
-        user = _USERS_DB[mobile]
-        # Update language and mode if provided
-        user.update({
-            "language": data.language.value,
-            "mode": data.mode.value,
-            "updated_at": datetime.utcnow().isoformat()
-        })
-    else:
-        # Create new user (not yet verified)
-        _USERS_DB[mobile] = {
-            "id": _generate_user_id(),
-            "mobile": mobile,
-            "name": data.name,
-            "email": data.email,
-            "language": data.language.value,
-            "mode": data.mode.value,
-            "verified": False,
-            "created_at": datetime.utcnow().isoformat()
+    session = SessionLocal()
+    try:
+        # Check resend cooldown
+        existing_otp = (
+            session.query(OTPModel)
+            .filter(OTPModel.mobile == mobile)
+            .order_by(OTPModel.created_at.desc())
+            .first()
+        )
+        
+        cooldown_sec = getattr(config, "OTP_RESEND_COOLDOWN_SECONDS", 60)
+        if existing_otp and existing_otp.last_sent_at:
+            elapsed = (datetime.utcnow() - existing_otp.last_sent_at).total_seconds()
+            if elapsed < cooldown_sec:
+                remaining = int(cooldown_sec - elapsed)
+                raise ValueError(f"Please wait {remaining} seconds before requesting another OTP.")
+
+        # Query or create user in DB
+        user = session.query(UserModel).filter(UserModel.mobile == mobile).first()
+        lang_val = data.language.value if hasattr(data.language, 'value') else str(data.language)
+        mode_val = data.mode.value if hasattr(data.mode, 'value') else str(data.mode)
+        
+        if user:
+            user.name = data.name
+            user.email = data.email or user.email
+            user.language = lang_val
+            user.interface_mode = mode_val
+            user.updated_at = datetime.utcnow()
+        else:
+            user = UserModel(
+                mobile=mobile,
+                name=data.name,
+                email=data.email,
+                language=lang_val,
+                interface_mode=mode_val,
+                is_verified=False
+            )
+            session.add(user)
+        
+        session.flush()
+
+        # Generate OTP
+        otp_code = _generate_otp()
+        expiry_sec = getattr(config, "OTP_EXPIRY_SECONDS", 300)
+        expires_at = datetime.utcnow() + timedelta(seconds=expiry_sec)
+
+        if existing_otp:
+            existing_otp.otp_code = otp_code
+            existing_otp.expires_at = expires_at
+            existing_otp.attempts = 0
+            existing_otp.last_sent_at = datetime.utcnow()
+        else:
+            otp_record = OTPModel(
+                mobile=mobile,
+                otp_code=otp_code,
+                expires_at=expires_at,
+                attempts=0,
+                last_sent_at=datetime.utcnow()
+            )
+            session.add(otp_record)
+        
+        session.commit()
+
+        # Send OTP via SMS Gateway
+        sms_success, provider = sms_gateway.send_otp(mobile, otp_code)
+        
+        response = {
+            "success": True,
+            "message": f"OTP sent to {mobile}"
         }
-    
-    # Generate and store OTP
-    otp = _generate_otp()
-    _OTP_DB[mobile] = {
-        "otp": otp,
-        "expires": (datetime.utcnow() + timedelta(seconds=OTP_EXPIRY_SECONDS)).isoformat()
-    }
-    
-    # In production, send OTP via SMS gateway (Twilio, AWS SNS, etc.)
-    # For now, return it for development/testing
-    return {
-        "success": True,
-        "message": f"OTP sent to {mobile}",
-        "dev_otp": otp  # Remove in production!
-    }
+
+        # NEVER return dev_otp in production
+        if getattr(config, "ENVIRONMENT", "development") != "production":
+            response["dev_otp"] = otp_code
+            
+        return response
+    except Exception as e:
+        session.rollback()
+        raise e
+    finally:
+        session.close()
 
 
 def verify_otp_and_login(mobile: str, otp: str) -> Optional[LoginResult]:
     """
-    Verify OTP and return login credentials
+    Verify OTP code, mark user as verified, and issue signed JWT tokens.
+    Enforces maximum attempt limits and expiration checks.
     """
-    # Check if OTP exists and is not expired
-    if mobile not in _OTP_DB:
-        raise ValueError("OTP not found. Please register first.")
-    
-    otp_data = _OTP_DB[mobile]
-    expires_at = datetime.fromisoformat(otp_data["expires"])
-    
-    if datetime.utcnow() > expires_at:
-        del _OTP_DB[mobile]
-        raise ValueError("OTP has expired. Please request a new one.")
-    
-    if otp_data["otp"] != otp:
-        raise ValueError("Invalid OTP. Please try again.")
-    
-    # OTP is valid, get or create user
-    if mobile not in _USERS_DB:
-        raise ValueError("User not found. Please register first.")
-    
-    user_data = _USERS_DB[mobile]
-    user = User(
-        id=user_data["id"],
-        mobile=user_data["mobile"],
-        name=user_data["name"],
-        email=user_data.get("email"),
-        language=Language(user_data["language"]),
-        mode=InterfaceMode(user_data["mode"]),
-        created_at=datetime.fromisoformat(user_data["created_at"])
-    )
-    
-    # Mark user as verified
-    user_data["verified"] = True
-    user_data["verified_at"] = datetime.utcnow().isoformat()
-    
-    # Generate token
-    token = _generate_token()
-    _TOKENS_DB[token] = mobile
-    
-    # Remove OTP after successful verification
-    del _OTP_DB[mobile]
-    
-    return LoginResult(
-        user=user,
-        access_token=token
-    )
+    mobile = mobile.strip()
+    session = SessionLocal()
+    try:
+        otp_record = (
+            session.query(OTPModel)
+            .filter(OTPModel.mobile == mobile)
+            .order_by(OTPModel.created_at.desc())
+            .first()
+        )
+
+        if not otp_record:
+            raise ValueError("OTP not found. Please register or request an OTP first.")
+
+        max_attempts = getattr(config, "OTP_MAX_ATTEMPTS", 5)
+        if otp_record.attempts >= max_attempts:
+            session.delete(otp_record)
+            session.commit()
+            raise ValueError("Too many failed attempts. Please request a new OTP.")
+
+        if datetime.utcnow() > otp_record.expires_at:
+            session.delete(otp_record)
+            session.commit()
+            raise ValueError("OTP has expired. Please request a new one.")
+
+        if otp_record.otp_code != otp:
+            otp_record.attempts += 1
+            session.commit()
+            remaining_attempts = max_attempts - otp_record.attempts
+            if remaining_attempts <= 0:
+                raise ValueError("Too many failed attempts. Please request a new OTP.")
+            raise ValueError(f"Invalid OTP. {remaining_attempts} attempts remaining.")
+
+        # OTP is valid -> load user
+        user = session.query(UserModel).filter(UserModel.mobile == mobile).first()
+        if not user:
+            raise ValueError("User profile not found. Please register first.")
+
+        user.is_verified = True
+        user.updated_at = datetime.utcnow()
+        session.delete(otp_record)
+        session.commit()
+
+        # Build user Pydantic schema
+        try:
+            lang_enum = Language(user.language)
+        except ValueError:
+            lang_enum = Language.EN
+
+        try:
+            mode_enum = InterfaceMode(user.interface_mode)
+        except ValueError:
+            mode_enum = InterfaceMode.SIMPLE
+
+        user_schema = User(
+            id=user.id,
+            mobile=user.mobile,
+            name=user.name,
+            email=user.email,
+            language=lang_enum,
+            mode=mode_enum,
+            created_at=user.created_at
+        )
+
+        # Generate JWT access token
+        tokens = JWTManager.create_tokens(user_id=user.id, mobile=user.mobile)
+        access_token = tokens["access_token"]
+
+        return LoginResult(
+            user=user_schema,
+            access_token=access_token
+        )
+    except Exception as e:
+        session.rollback()
+        raise e
+    finally:
+        session.close()
 
 
 def get_user_by_mobile(mobile: str) -> Optional[User]:
-    """Get user by mobile number"""
-    if mobile not in _USERS_DB:
-        return None
-    
-    user_data = _USERS_DB[mobile]
-    return User(
-        id=user_data["id"],
-        mobile=user_data["mobile"],
-        name=user_data["name"],
-        email=user_data.get("email"),
-        language=Language(user_data["language"]),
-        mode=InterfaceMode(user_data["mode"]),
-        created_at=datetime.fromisoformat(user_data["created_at"])
-    )
+    """Retrieve user profile by mobile number"""
+    session = SessionLocal()
+    try:
+        user = session.query(UserModel).filter(UserModel.mobile == mobile).first()
+        if not user:
+            return None
+        
+        try:
+            lang_enum = Language(user.language)
+        except ValueError:
+            lang_enum = Language.EN
+
+        try:
+            mode_enum = InterfaceMode(user.interface_mode)
+        except ValueError:
+            mode_enum = InterfaceMode.SIMPLE
+
+        return User(
+            id=user.id,
+            mobile=user.mobile,
+            name=user.name,
+            email=user.email,
+            language=lang_enum,
+            mode=mode_enum,
+            created_at=user.created_at
+        )
+    finally:
+        session.close()
+
+
+def get_user_by_id(user_id: str) -> Optional[User]:
+    """Retrieve user profile by user ID"""
+    session = SessionLocal()
+    try:
+        user = session.query(UserModel).filter(UserModel.id == user_id).first()
+        if not user:
+            return None
+
+        try:
+            lang_enum = Language(user.language)
+        except ValueError:
+            lang_enum = Language.EN
+
+        try:
+            mode_enum = InterfaceMode(user.interface_mode)
+        except ValueError:
+            mode_enum = InterfaceMode.SIMPLE
+
+        return User(
+            id=user.id,
+            mobile=user.mobile,
+            name=user.name,
+            email=user.email,
+            language=lang_enum,
+            mode=mode_enum,
+            created_at=user.created_at
+        )
+    finally:
+        session.close()
 
 
 def verify_token(token: str) -> Optional[str]:
-    """Verify if token is valid and return mobile number"""
-    return _TOKENS_DB.get(token)
+    """Verify access token and return mobile number if valid"""
+    try:
+        payload = JWTManager.verify_token(token)
+        if payload and payload.get("type") == "access":
+            return payload.get("mobile")
+        return None
+    except Exception:
+        return None
 
 
 def logout(token: str) -> bool:
-    """Logout user by removing token"""
-    if token in _TOKENS_DB:
-        del _TOKENS_DB[token]
-        return True
-    return False
+    """Revoke user session token"""
+    return JWTManager.revoke_token(token)
