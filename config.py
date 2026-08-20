@@ -14,9 +14,18 @@ class Config:
     # Database
     DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///legal_saathi.db")
     
-    # API Keys
+    # API Keys & LLM Configuration
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6")
+    OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+    LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
     GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY", "")
+    
+    # RAG Pipeline Configuration
+    CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 1000))
+    CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 150))
+    RAG_TOP_K = int(os.getenv("RAG_TOP_K", 5))
+    RAG_SIMILARITY_THRESHOLD = float(os.getenv("RAG_SIMILARITY_THRESHOLD", 0.70))
     
     # AWS
     AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
